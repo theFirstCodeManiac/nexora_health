@@ -1,0 +1,6 @@
+{
+  "name": "NEXORA Health",
+  "description": "Connecting frontline data to better health decisions. Offline-first health data infrastructure, synchronization, validation, and operational intelligence platform for low-connectivity healthcare environments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

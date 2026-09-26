@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="96" fill="#0A192F"/>
+  <!-- Subtle medical cross combined with network nodes -->
+  <path d="M224 128H288V224H384V288H288V384H224V288H128V224H224V128Z" fill="#0D9488" fill-opacity="0.22" stroke="#14B8A6" stroke-width="12" stroke-linejoin="round"/>
+  <!-- Data flow circuit lines -->
+  <path d="M160 256H352" stroke="#38BDF8" stroke-width="10" stroke-linecap="round"/>
+  <path d="M256 160V352" stroke="#38BDF8" stroke-width="10" stroke-linecap="round"/>
+  <!-- Network nodes -->
+  <circle cx="256" cy="144" r="22" fill="#14B8A6" stroke="#0A192F" stroke-width="6"/>
+  <circle cx="256" cy="368" r="22" fill="#14B8A6" stroke="#0A192F" stroke-width="6"/>
+  <circle cx="144" cy="256" r="22" fill="#14B8A6" stroke="#0A192F" stroke-width="6"/>
+  <circle cx="368" cy="256" r="22" fill="#14B8A6" stroke="#0A192F" stroke-width="6"/>
+  <circle cx="256" cy="256" r="28" fill="#F8FAFC" stroke="#0284C7" stroke-width="8"/>
+</svg>
