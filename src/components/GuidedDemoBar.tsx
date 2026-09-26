@@ -103,26 +103,26 @@ export const GuidedDemoBar: React.FC<GuidedDemoBarProps> = ({
   const active = DEMO_STEPS.find((s) => s.step === currentStep) || DEMO_STEPS[0];
 
   return (
-    <div className="border-b border-teal-800/60 bg-slate-900 text-white px-4 py-2.5">
-      <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-        <div className="flex items-start sm:items-center gap-3">
+    <div className="border-b border-teal-800/60 bg-slate-900 text-white px-3 sm:px-4 py-2.5">
+      <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5 sm:gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3 min-w-0">
           <div className="flex items-center gap-1.5 text-xs font-mono uppercase tracking-wider text-teal-400 shrink-0">
-            <Sparkles className="w-3.5 h-3.5" />
+            <Sparkles className="w-3.5 h-3.5 shrink-0" />
             <span>Guided Demo · Step {active.step}/12</span>
           </div>
           <span className="hidden sm:inline text-slate-600" aria-hidden="true">·</span>
-          <div className="text-xs sm:text-sm">
+          <div className="text-xs sm:text-sm leading-snug">
             <span className="font-semibold text-white">{active.title}: </span>
             <span className="text-slate-300">{active.description}</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap sm:flex-nowrap items-center justify-between sm:justify-end gap-2 shrink-0 w-full lg:w-auto">
           <button
             type="button"
             disabled={currentStep <= 1}
             onClick={() => onSelectStep(Math.max(1, currentStep - 1))}
-            className="p-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40 transition-colors"
+            className="p-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40 transition-colors shrink-0"
             title="Previous Step"
           >
             <ChevronLeft className="w-4 h-4" />
@@ -131,17 +131,17 @@ export const GuidedDemoBar: React.FC<GuidedDemoBarProps> = ({
           <button
             type="button"
             onClick={() => onExecuteStep(active.step)}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+            className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold transition-colors whitespace-nowrap"
           >
-            <Play className="w-3.5 h-3.5 fill-current" />
-            <span>{active.actionLabel}</span>
+            <Play className="w-3.5 h-3.5 fill-current shrink-0" />
+            <span className="truncate">{active.actionLabel}</span>
           </button>
 
           <button
             type="button"
             disabled={currentStep >= 12}
             onClick={() => onSelectStep(Math.min(12, currentStep + 1))}
-            className="p-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40 transition-colors"
+            className="p-1.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40 transition-colors shrink-0"
             title="Next Step"
           >
             <ChevronRight className="w-4 h-4" />
@@ -150,7 +150,7 @@ export const GuidedDemoBar: React.FC<GuidedDemoBarProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors ml-1"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors sm:ml-1 shrink-0"
             title="Hide Guided Demo Bar"
           >
             <X className="w-4 h-4" />

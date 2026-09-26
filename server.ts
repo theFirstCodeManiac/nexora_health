@@ -4,7 +4,12 @@ import { fileURLToPath } from 'url';
 import * as dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
-import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
+import {
+  requireAuth,
+  AuthRequest,
+  LIVE_OPERATOR_TOKEN,
+  LIVE_OPERATOR_PROFILE,
+} from './src/middleware/auth.ts';
 import { getOrCreateUser } from './src/db/users.ts';
 import {
   ensureSeeded,
@@ -37,69 +42,52 @@ async function startServer() {
 
   app.use(express.json({ limit: '5mb' }));
 
-  // Demo credentials login endpoint for worker@nexora.health and supervisor@nexora.health
-  app.post('/api/auth/demo-login', async (req, res) => {
+  // Live Credentials Login Endpoint (daniel_idah / @Best2026_)
+  const handleLogin = async (req: express.Request, res: express.Response) => {
     try {
-      const { email, password, role } = req.body;
-      const cleanEmail = (email || '').trim().toLowerCase();
+      const { username, email, password } = req.body;
+      const identifier = String(username || email || '').trim();
 
-      if (password !== 'Demo123!') {
+      if (identifier !== 'daniel_idah' || password !== '@Best2026_') {
         return res.status(401).json({
-          error: 'Invalid credentials. Use Demo123! for hackathon demo accounts.',
+          error: 'Invalid username or password. Please check your credentials and try again.',
         });
       }
 
-      const isSupervisor =
-        role === 'supervisor' || cleanEmail === 'supervisor@nexora.health';
-
-      const profile = isSupervisor
-        ? {
-            token: 'nexora-demo-supervisor',
-            uid: 'demo-supervisor-uid-001',
-            email: 'supervisor@nexora.health',
-            fullName: 'Dr. Tunde Okonkwo',
-            role: 'supervisor' as const,
-            workerCode: 'SUP-002',
-            assignedCommunity: 'Kano & Kaduna Catchment Zone',
-          }
-        : {
-            token: 'nexora-demo-worker',
-            uid: 'demo-worker-uid-001',
-            email: 'worker@nexora.health',
-            fullName: 'Amina Bello (CHW)',
-            role: 'worker' as const,
-            workerCode: 'CHW-014',
-            assignedCommunity: 'Ungogo Ward A',
-          };
-
       await ensureSeeded();
       await getOrCreateUser(
-        profile.uid,
-        profile.email,
-        profile.fullName,
-        profile.role,
-        profile.assignedCommunity,
-        profile.workerCode
+        LIVE_OPERATOR_PROFILE.uid,
+        LIVE_OPERATOR_PROFILE.email,
+        LIVE_OPERATOR_PROFILE.fullName,
+        LIVE_OPERATOR_PROFILE.role,
+        LIVE_OPERATOR_PROFILE.assignedCommunity,
+        LIVE_OPERATOR_PROFILE.workerCode
       );
 
       await db.insert(auditLogs).values({
-        userUid: profile.uid,
-        userName: profile.fullName,
-        userRole: profile.role === 'supervisor' ? 'Supervisor' : 'Frontline Worker',
-        action: 'User Login (Authenticated Session)',
-        resource: `Session · ${profile.email}`,
+        userUid: LIVE_OPERATOR_PROFILE.uid,
+        userName: LIVE_OPERATOR_PROFILE.fullName,
+        userRole: 'Authorized Operator',
+        action: 'User Sign-In (Authenticated Live Session)',
+        resource: `Session · ${LIVE_OPERATOR_PROFILE.username}`,
         status: 'Success',
-        ipOrDevice: profile.role === 'supervisor' ? 'Supervisor Console' : 'PWA Field Device',
+        ipOrDevice: 'NEXORA Live Portal',
       });
 
-      res.json({ user: profile, token: profile.token });
+      res.json({
+        user: LIVE_OPERATOR_PROFILE,
+        token: LIVE_OPERATOR_TOKEN,
+      });
     } catch (error: any) {
-      console.error('Demo login error:', error);
-      res.status(500).json({ error: error.message || 'Authentication failed' });
+      console.error('Login error:', error);
+      res.status(500).json({ error: 'Unable to complete sign-in right now.' });
     }
-  });
+  };
 
-  // Verify Firebase or Demo session and sync user with PostgreSQL
+  app.post('/api/auth/login', handleLogin);
+  app.post('/api/auth/demo-login', handleLogin);
+
+  // Verify session and sync user with PostgreSQL
   app.get('/api/auth/session', requireAuth, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
@@ -108,36 +96,37 @@ async function startServer() {
       await ensureSeeded();
       const dbUser = await getOrCreateUser(
         req.user.uid,
-        req.user.email || 'worker@nexora.health',
-        req.user.fullName || 'Frontline Worker',
-        req.user.role || 'worker',
-        req.user.assignedCommunity || 'Ungogo Ward A',
-        req.user.workerCode || 'CHW-014'
+        req.user.email || LIVE_OPERATOR_PROFILE.email,
+        req.user.fullName || LIVE_OPERATOR_PROFILE.fullName,
+        'supervisor',
+        req.user.assignedCommunity || LIVE_OPERATOR_PROFILE.assignedCommunity,
+        req.user.workerCode || LIVE_OPERATOR_PROFILE.workerCode
       );
       res.json({
         user: {
           uid: dbUser.uid,
+          username: 'daniel_idah',
           email: dbUser.email,
           fullName: dbUser.fullName,
-          role: (req.user.role || dbUser.role) as 'worker' | 'supervisor',
+          role: 'supervisor',
           workerCode: dbUser.workerCode,
           assignedCommunity: dbUser.assignedCommunity,
         },
       });
     } catch (error: any) {
       console.error('Session verification error:', error);
-      res.status(500).json({ error: error.message || 'Failed to verify session' });
+      res.status(500).json({ error: 'Failed to verify session' });
     }
   });
 
-  // Main bootstrap data endpoint
-  app.get('/api/bootstrap', requireAuth, async (req: AuthRequest, res) => {
+  // Main bootstrap data endpoint (100% Live PostgreSQL Data)
+  app.get('/api/bootstrap', requireAuth, async (_req: AuthRequest, res) => {
     try {
       const data = await getAllBootstrapData();
       res.json(data);
     } catch (error: any) {
       console.error('Bootstrap data error:', error);
-      res.status(500).json({ error: error.message || 'Failed to load platform data' });
+      res.status(500).json({ error: 'Failed to load platform data' });
     }
   });
 
@@ -145,15 +134,15 @@ async function startServer() {
   app.post('/api/patients', requireAuth, async (req: AuthRequest, res) => {
     try {
       const actor = {
-        uid: req.user?.uid || 'demo-worker-uid-001',
-        name: req.user?.fullName || 'Amina Bello (CHW)',
-        role: req.user?.role || 'worker',
+        uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
+        name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
+        role: req.user?.role || 'supervisor',
       };
       const result = await createPatientRecord(req.body, actor);
       res.status(201).json(result);
     } catch (error: any) {
       console.error('Create patient error:', error);
-      res.status(500).json({ error: error.message || 'Failed to register patient' });
+      res.status(500).json({ error: 'Failed to register patient' });
     }
   });
 
@@ -161,15 +150,15 @@ async function startServer() {
   app.post('/api/encounters', requireAuth, async (req: AuthRequest, res) => {
     try {
       const actor = {
-        uid: req.user?.uid || 'demo-worker-uid-001',
-        name: req.user?.fullName || 'Amina Bello (CHW)',
-        role: req.user?.role || 'worker',
+        uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
+        name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
+        role: req.user?.role || 'supervisor',
       };
       const result = await createOrSyncEncounterRecord(req.body, actor);
       res.status(201).json(result);
     } catch (error: any) {
       console.error('Create encounter error:', error);
-      res.status(500).json({ error: error.message || 'Failed to record encounter' });
+      res.status(500).json({ error: 'Failed to record encounter' });
     }
   });
 
@@ -177,9 +166,9 @@ async function startServer() {
   app.post('/api/sync/batch', requireAuth, async (req: AuthRequest, res) => {
     try {
       const actor = {
-        uid: req.user?.uid || 'demo-worker-uid-001',
-        name: req.user?.fullName || 'Amina Bello (CHW)',
-        role: req.user?.role || 'worker',
+        uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
+        name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
+        role: req.user?.role || 'supervisor',
       };
       const { items } = req.body as {
         items: Array<{
@@ -214,7 +203,7 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error('Batch sync error:', error);
-      res.status(500).json({ error: error.message || 'Batch synchronization failed' });
+      res.status(500).json({ error: 'Batch synchronization failed' });
     }
   });
 
@@ -223,8 +212,8 @@ async function startServer() {
     try {
       const followUpId = parseInt(String(req.params.id), 10);
       const actor = {
-        uid: req.user?.uid || 'demo-supervisor-uid-001',
-        name: req.user?.fullName || 'Dr. Tunde Okonkwo',
+        uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
+        name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
         role: req.user?.role || 'supervisor',
       };
       const updated = await completeFollowUpRecord(
@@ -235,7 +224,7 @@ async function startServer() {
       res.json({ followUp: updated });
     } catch (error: any) {
       console.error('Complete follow-up error:', error);
-      res.status(500).json({ error: error.message || 'Failed to complete follow-up' });
+      res.status(500).json({ error: 'Failed to complete follow-up' });
     }
   });
 
@@ -244,8 +233,8 @@ async function startServer() {
     try {
       const alertId = parseInt(String(req.params.id), 10);
       const actor = {
-        uid: req.user?.uid || 'demo-supervisor-uid-001',
-        name: req.user?.fullName || 'Dr. Tunde Okonkwo',
+        uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
+        name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
         role: req.user?.role || 'supervisor',
       };
       const updated = await resolveDataQualityAlertRecord(
@@ -256,21 +245,21 @@ async function startServer() {
       res.json({ alert: updated });
     } catch (error: any) {
       console.error('Resolve alert error:', error);
-      res.status(500).json({ error: error.message || 'Failed to resolve alert' });
+      res.status(500).json({ error: 'Failed to resolve alert' });
     }
   });
 
-  // Server-side Gemini AI Operational Intelligence Brief
+  // 1. Server-side Gemini AI Operational Intelligence Brief
   app.post('/api/intelligence/ai-brief', requireAuth, async (req: AuthRequest, res) => {
     try {
       const { summaryMetrics } = req.body;
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
-        contents: `Analyze these real-time operational health data metrics from NEXORA Health and generate 4 concise operational decision-support insights for a district healthcare supervisor. Focus strictly on data quality, synchronization reliability, community encounter trends, and follow-up completion. Do NOT generate medical diagnoses.
-Metrics: ${JSON.stringify(summaryMetrics)}`,
+        contents: `Analyze these live operational health data metrics from NEXORA Health and generate 4 clear, user-friendly decision-support insights for a clinic supervisor. Focus on data accuracy, follow-up care, community visit trends, and workflow readiness. Use everyday language that health workers and clinic coordinators easily understand.
+Live Metrics: ${JSON.stringify(summaryMetrics)}`,
         config: {
           systemInstruction:
-            'You are the NEXORA Health Operational Decision Support Layer. Provide factual, non-diagnostic operational and data quality insights in valid JSON format.',
+            'You are the NEXORA Health Smart Clinic Advisor. Provide helpful, clear, non-jargon operational insights in valid JSON format.',
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.ARRAY,
@@ -280,15 +269,15 @@ Metrics: ${JSON.stringify(summaryMetrics)}`,
                 category: {
                   type: Type.STRING,
                   description:
-                    'Category of insight: Data Quality, Synchronization, Community Trend, or Follow-Up Operations',
+                    'Category of insight: Care Follow-Up, Record Quality, Community Visits, or Clinic Readiness',
                 },
                 headline: {
                   type: Type.STRING,
-                  description: 'One-sentence quantitative operational insight',
+                  description: 'One-sentence clear insight based on the live numbers',
                 },
                 recommendation: {
                   type: Type.STRING,
-                  description: 'Concrete operational action for the supervisor',
+                  description: 'Practical next step for the clinic team',
                 },
                 priority: {
                   type: Type.STRING,
@@ -303,20 +292,151 @@ Metrics: ${JSON.stringify(summaryMetrics)}`,
 
       const text = response.text || '[]';
       const parsed = JSON.parse(text.trim());
-      res.json({ insights: parsed, generatedBy: 'Gemini 3.8 Flash Operational Layer' });
+      res.json({ insights: parsed, generatedBy: 'Gemini 3.8 Flash' });
     } catch (error: any) {
       console.error('Gemini operational intelligence error:', error);
       res.status(500).json({
-        error:
-          error.message ||
-          'Failed to generate AI operational brief from Gemini service.',
+        error: 'Smart summary is temporarily unavailable.',
+      });
+    }
+  });
+
+  // 2. Server-side Gemini AI Smart Visit & Care Note Assistant
+  app.post('/api/ai/visit-assistant', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const {
+        patientName,
+        encounterType,
+        reasonForVisit,
+        symptoms,
+        temperature,
+        bloodPressure,
+        heartRate,
+        respiratoryRate,
+      } = req.body;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: `Assist a community health worker recording a live patient visit.
+Patient: ${patientName || 'Patient'}
+Visit Type: ${encounterType || 'General Checkup'}
+Reason for Visit: ${reasonForVisit || 'Routine check'}
+Symptoms: ${symptoms || 'None reported'}
+Vitals: Temperature ${temperature || 'N/A'}°C, Blood Pressure ${bloodPressure || 'N/A'} mmHg, Heart Rate ${heartRate || 'N/A'} bpm, Respiratory Rate ${respiratoryRate || 'N/A'} /min.
+
+Provide a structured, plain-language care suggestion to help complete the visit form accurately.`,
+        config: {
+          systemInstruction:
+            'You are a supportive primary healthcare assistant helping a nurse or community health worker write clear visit observations and care actions in simple, everyday language.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              suggestedObservations: {
+                type: Type.STRING,
+                description:
+                  'Clear 1-2 sentence clinical observation note summarizing the vitals and presentation',
+              },
+              suggestedActionTaken: {
+                type: Type.STRING,
+                description:
+                  'Clear 1-2 sentence supportive care action and counseling step',
+              },
+              triagePriority: {
+                type: Type.STRING,
+                description: 'Routine Care, Watch Closely, or Urgent Hospital Referral',
+              },
+              referralRecommended: {
+                type: Type.BOOLEAN,
+                description: 'True if vital signs or symptoms warrant hospital referral',
+              },
+              followUpDays: {
+                type: Type.INTEGER,
+                description: 'Recommended number of days until next follow-up check (e.g., 2, 7, 14)',
+              },
+              familyCareTip: {
+                type: Type.STRING,
+                description: 'One simple health tip to share verbally with the patient or family',
+              },
+            },
+            required: [
+              'suggestedObservations',
+              'suggestedActionTaken',
+              'triagePriority',
+              'referralRecommended',
+              'followUpDays',
+              'familyCareTip',
+            ],
+          },
+        },
+      });
+
+      const text = response.text || '{}';
+      const parsed = JSON.parse(text.trim());
+      res.json({ suggestion: parsed });
+    } catch (error: any) {
+      console.error('Gemini visit assistant error:', error);
+      res.status(500).json({
+        error: 'Unable to generate visit suggestions right now.',
+      });
+    }
+  });
+
+  // 3. Server-side Gemini Interactive AI Clinic & Care Assistant
+  app.post('/api/ai/ask', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { question, liveContext } = req.body;
+      if (!question || !String(question).trim()) {
+        return res.status(400).json({ error: 'Please enter a question.' });
+      }
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: `Live Clinic Context: ${JSON.stringify(liveContext || {})}
+Operator Question: ${question}`,
+        config: {
+          systemInstruction:
+            'You are the NEXORA Health AI Assistant. Answer questions from clinic staff clearly, warmly, and in plain, user-friendly language without technical jargon. Use the provided Live Clinic Context when answering questions about current patients, visits, or follow-ups.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              answer: {
+                type: Type.STRING,
+                description: 'Clear, helpful response in plain language (2-4 sentences)',
+              },
+              keyPoints: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: '2-3 actionable bullet points or takeaways',
+              },
+              suggestedFollowUpQuestion: {
+                type: Type.STRING,
+                description: 'One relevant follow-up question the user might want to ask next',
+              },
+            },
+            required: ['answer', 'keyPoints', 'suggestedFollowUpQuestion'],
+          },
+        },
+      });
+
+      const text = response.text || '{}';
+      const parsed = JSON.parse(text.trim());
+      res.json({ reply: parsed });
+    } catch (error: any) {
+      console.error('Gemini ask assistant error:', error);
+      res.status(500).json({
+        error: 'AI Assistant is temporarily unavailable.',
       });
     }
   });
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

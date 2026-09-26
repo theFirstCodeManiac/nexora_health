@@ -1,0 +1,31 @@
+{
+  "id": "/",
+  "name": "NEXORA Health — Offline-First Frontline Health Platform",
+  "short_name": "NEXORA",
+  "description": "Connecting frontline data to better health decisions. Offline-first health data capture, synchronization, and operational intelligence.",
+  "theme_color": "#0A192F",
+  "background_color": "#F8FAFC",
+  "display": "standalone",
+  "start_url": "/",
+  "scope": "/",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
