@@ -38,9 +38,10 @@ export function validatePatientForm(
     blockingErrors.push('Date of birth is required.');
   } else {
     const dob = new Date(input.dateOfBirth);
-    const now = new Date('2026-09-26');
-    if (isNaN(dob.getTime()) || dob > now || dob.getFullYear() < 1910) {
-      blockingErrors.push('Date of birth must be a valid past date between 1910 and today.');
+    const now = new Date();
+    now.setDate(now.getDate() + 1);
+    if (isNaN(dob.getTime()) || dob > now || dob.getFullYear() < 1905) {
+      blockingErrors.push('Date of birth must be a valid past date between 1905 and today.');
     }
   }
   if (!input.sex) {
@@ -135,7 +136,8 @@ export function validateEncounterForm(
     blockingErrors.push('Encounter date is required.');
   } else {
     const encDate = new Date(input.encounterDate);
-    const maxDate = new Date('2026-09-27');
+    const maxDate = new Date();
+    maxDate.setDate(maxDate.getDate() + 2);
     if (isNaN(encDate.getTime()) || encDate > maxDate || encDate.getFullYear() < 2020) {
       blockingErrors.push('Invalid encounter date: cannot be in the future or prior to 2020.');
     }

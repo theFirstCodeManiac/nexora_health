@@ -44,12 +44,11 @@ export async function registerNexoraServiceWorker(): Promise<ServiceWorkerRegist
 
 export async function warmUpCriticalApiCaches(
   token: string,
-  role: 'worker' | 'supervisor'
+  role: 'worker' | 'supervisor' = 'supervisor'
 ): Promise<void> {
   if (typeof window === 'undefined' || !('caches' in window)) return;
 
   try {
-    // 1. Direct Cache Storage write so even if SW controller is still claiming, CacheStorage has the API responses
     const apiCache = await caches.open(API_CACHE_NAME);
     const endpoints = ['/api/bootstrap', '/api/auth/session'];
 
@@ -59,7 +58,6 @@ export async function warmUpCriticalApiCaches(
           const response = await fetch(endpoint, {
             headers: {
               Authorization: `Bearer ${token}`,
-              'X-Nexora-Role': role,
             },
           });
           if (response.ok) {
@@ -71,7 +69,6 @@ export async function warmUpCriticalApiCaches(
       })
     );
 
-    // 2. Also pre-cache core shell URLs into CORE_CACHE_NAME
     const coreCache = await caches.open(CORE_CACHE_NAME);
     const coreUrls = [
       '/',
@@ -96,7 +93,6 @@ export async function warmUpCriticalApiCaches(
       })
     );
 
-    // 3. Notify active Service Worker if controlling the page
     if (navigator.serviceWorker?.controller) {
       navigator.serviceWorker.controller.postMessage({
         type: 'WARM_API_CACHE',
@@ -106,6 +102,28 @@ export async function warmUpCriticalApiCaches(
     }
   } catch (err) {
     console.warn('Cache warm-up warning:', err);
+  }
+}
+
+/**
+ * Purges cached API responses containing sensitive PHI upon user sign-out.
+ */
+export async function clearSensitiveApiCaches(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  try {
+    if ('caches' in window) {
+      await Promise.all([
+        caches.delete(API_CACHE_NAME),
+        caches.delete('nexora-critical-api-v1'),
+      ]);
+    }
+    if (navigator.serviceWorker?.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'CLEAR_SENSITIVE_CACHES',
+      });
+    }
+  } catch {
+    // Ignore cache deletion error
   }
 }
 

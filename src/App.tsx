@@ -30,6 +30,7 @@ import {
   updateOfflineQueueItemStatus,
   getMetaValue,
   setMetaValue,
+  clearSensitiveOfflineState,
 } from './lib/indexedDb.ts';
 import {
   validateEncounterForm,
@@ -38,6 +39,7 @@ import {
 } from './lib/validation.ts';
 import {
   warmUpCriticalApiCaches,
+  clearSensitiveApiCaches,
   getServiceWorkerCacheStats,
   ServiceWorkerCacheStats,
 } from './lib/serviceWorkerManager.ts';
@@ -181,7 +183,7 @@ export default function App() {
       if (isOffline) {
         if (typeof window !== 'undefined' && 'caches' in window) {
           try {
-            const apiCache = await caches.open('nexora-critical-api-v1');
+            const apiCache = await caches.open('nexora-critical-api-v2');
             const cachedRes = await apiCache.match('/api/bootstrap');
             if (cachedRes) {
               const cachedData = await cachedRes.json();
@@ -208,6 +210,16 @@ export default function App() {
             Authorization: `Bearer ${activeToken}`,
           },
         });
+        if (res.status === 401) {
+          setUser(null);
+          setAuthToken(null);
+          try {
+            localStorage.removeItem(AUTH_STORAGE_KEY);
+          } catch {
+            // Ignore storage error
+          }
+          return;
+        }
         if (!res.ok) throw new Error('Failed to fetch platform records');
         const data = await res.json();
         setPatients(data.patients || []);
@@ -245,31 +257,38 @@ export default function App() {
       );
       setLastSyncTimestamp(savedLastSync);
 
-      const cachedBootstrap = await getMetaValue<any>('cachedBootstrapLive', null);
-      if (cachedBootstrap) {
-        setPatients(cachedBootstrap.patients || []);
-        setEncounters(cachedBootstrap.encounters || []);
-        setFollowUps(cachedBootstrap.followUps || []);
-        setSyncHistory(cachedBootstrap.syncQueue || []);
-        setAlerts(cachedBootstrap.dataQualityAlerts || []);
-        setAuditLogs(cachedBootstrap.auditLogs || []);
-        setWorkers(cachedBootstrap.workers || []);
-        setCommunities(cachedBootstrap.communities || []);
-      }
-
-      // Restore authenticated session if previously signed in
+      // Restore authenticated session if previously signed in and not expired
+      let hasActiveSession = false;
       try {
         const rawSession = localStorage.getItem(AUTH_STORAGE_KEY);
         if (rawSession) {
           const parsed = JSON.parse(rawSession);
-          if (parsed?.token && parsed?.user) {
+          const notExpired = !parsed?.expiresAt || parsed.expiresAt > Date.now();
+          if (parsed?.token && parsed?.user && notExpired) {
+            hasActiveSession = true;
             setAuthToken(parsed.token);
             setUser(parsed.user);
             fetchBootstrapData(parsed.token);
+          } else {
+            localStorage.removeItem(AUTH_STORAGE_KEY);
           }
         }
       } catch {
         // Ignore storage read errors
+      }
+
+      if (hasActiveSession) {
+        const cachedBootstrap = await getMetaValue<any>('cachedBootstrapLive', null);
+        if (cachedBootstrap) {
+          setPatients(cachedBootstrap.patients || []);
+          setEncounters(cachedBootstrap.encounters || []);
+          setFollowUps(cachedBootstrap.followUps || []);
+          setSyncHistory(cachedBootstrap.syncQueue || []);
+          setAlerts(cachedBootstrap.dataQualityAlerts || []);
+          setAuditLogs(cachedBootstrap.auditLogs || []);
+          setWorkers(cachedBootstrap.workers || []);
+          setCommunities(cachedBootstrap.communities || []);
+        }
       }
 
       const stats = await getServiceWorkerCacheStats();
@@ -319,7 +338,11 @@ export default function App() {
       try {
         localStorage.setItem(
           AUTH_STORAGE_KEY,
-          JSON.stringify({ token: data.token, user: data.user })
+          JSON.stringify({
+            token: data.token,
+            user: data.user,
+            expiresAt: data.expiresAt || Date.now() + 12 * 60 * 60 * 1000,
+          })
         );
       } catch {
         // Ignore storage errors
@@ -894,15 +917,33 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
+                const tokenToRevoke = authToken;
                 setUser(null);
                 setAuthToken(null);
                 setPublicPageOverride(null);
+                setPatients([]);
+                setEncounters([]);
+                setFollowUps([]);
+                setSyncHistory([]);
+                setAlerts([]);
+                setAuditLogs([]);
+                setAiInsights(null);
                 try {
                   localStorage.removeItem(AUTH_STORAGE_KEY);
                 } catch {
                   // Ignore storage errors
                 }
+                await Promise.all([
+                  clearSensitiveOfflineState(),
+                  clearSensitiveApiCaches(),
+                  tokenToRevoke && !isOffline
+                    ? fetch('/api/auth/logout', {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${tokenToRevoke}` },
+                      }).catch(() => undefined)
+                    : Promise.resolve(),
+                ]);
               }}
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-900 transition-colors whitespace-nowrap"
             >

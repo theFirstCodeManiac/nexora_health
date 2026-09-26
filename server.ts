@@ -7,9 +7,21 @@ import { createServer as createViteServer } from 'vite';
 import {
   requireAuth,
   AuthRequest,
-  LIVE_OPERATOR_TOKEN,
   LIVE_OPERATOR_PROFILE,
+  verifyOperatorCredentials,
+  issueOperatorSessionToken,
+  revokeOperatorSessionToken,
 } from './src/middleware/auth.ts';
+import {
+  securityHeadersMiddleware,
+  createRateLimiter,
+  sanitizeText,
+  parsePositiveInt,
+  validateServerPatientPayload,
+  validateServerEncounterPayload,
+  sanitizeResolutionStatus,
+  getClientIdentifier,
+} from './src/middleware/security.ts';
 import { getOrCreateUser } from './src/db/users.ts';
 import {
   ensureSeeded,
@@ -36,19 +48,58 @@ const ai = new GoogleGenAI({
   },
 });
 
+const loginRateLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 10,
+  keyPrefix: 'auth-login',
+  message: 'Too many sign-in attempts. Please wait a few minutes before trying again.',
+});
+
+const aiRateLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  maxRequests: 25,
+  keyPrefix: 'ai-endpoint',
+  message: 'AI assistant request rate limit reached. Please wait a moment and try again.',
+});
+
+const apiRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 180,
+  keyPrefix: 'general-api',
+  message: 'Too many requests. Please slow down and try again shortly.',
+});
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: '5mb' }));
+  app.disable('x-powered-by');
+  app.use(securityHeadersMiddleware);
+  app.use(express.json({ limit: '256kb' }));
+  app.use('/api', apiRateLimiter);
 
   // Live Credentials Login Endpoint (daniel_idah / @Best2026_)
-  const handleLogin = async (req: express.Request, res: express.Response) => {
+  app.post('/api/auth/login', loginRateLimiter, async (req: express.Request, res: express.Response) => {
     try {
-      const { username, email, password } = req.body;
-      const identifier = String(username || email || '').trim();
+      const rawUsername = sanitizeText(req.body?.username || req.body?.email, 80);
+      const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
 
-      if (identifier !== 'daniel_idah' || password !== '@Best2026_') {
+      if (!verifyOperatorCredentials(rawUsername, rawPassword)) {
+        try {
+          await ensureSeeded();
+          await db.insert(auditLogs).values({
+            userUid: 'unauthenticated',
+            userName: rawUsername || 'Unknown User',
+            userRole: 'Unauthenticated',
+            action: 'Failed Sign-In Attempt',
+            resource: 'Authentication Portal',
+            status: 'Denied',
+            ipOrDevice: getClientIdentifier(req),
+          });
+        } catch {
+          // Ignore audit log error if DB is initializing
+        }
+
         return res.status(401).json({
           error: 'Invalid username or password. Please check your credentials and try again.',
         });
@@ -64,6 +115,8 @@ async function startServer() {
         LIVE_OPERATOR_PROFILE.workerCode
       );
 
+      const { token, expiresAt } = issueOperatorSessionToken();
+
       await db.insert(auditLogs).values({
         userUid: LIVE_OPERATOR_PROFILE.uid,
         userName: LIVE_OPERATOR_PROFILE.fullName,
@@ -71,21 +124,41 @@ async function startServer() {
         action: 'User Sign-In (Authenticated Live Session)',
         resource: `Session · ${LIVE_OPERATOR_PROFILE.username}`,
         status: 'Success',
-        ipOrDevice: 'NEXORA Live Portal',
+        ipOrDevice: getClientIdentifier(req),
       });
 
-      res.json({
+      return res.json({
         user: LIVE_OPERATOR_PROFILE,
-        token: LIVE_OPERATOR_TOKEN,
+        token,
+        expiresAt,
       });
-    } catch (error: any) {
-      console.error('Login error:', error);
-      res.status(500).json({ error: 'Unable to complete sign-in right now.' });
+    } catch {
+      return res.status(500).json({ error: 'Unable to complete sign-in right now.' });
     }
-  };
+  });
 
-  app.post('/api/auth/login', handleLogin);
-  app.post('/api/auth/demo-login', handleLogin);
+  // Explicit Session Logout & Token Revocation Endpoint
+  app.post('/api/auth/logout', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+      revokeOperatorSessionToken(token);
+
+      await db.insert(auditLogs).values({
+        userUid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
+        userName: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
+        userRole: 'Authorized Operator',
+        action: 'User Sign-Out (Session Revoked)',
+        resource: `Session · ${LIVE_OPERATOR_PROFILE.username}`,
+        status: 'Success',
+        ipOrDevice: getClientIdentifier(req),
+      });
+
+      return res.json({ loggedOut: true });
+    } catch {
+      return res.json({ loggedOut: true });
+    }
+  });
 
   // Verify session and sync user with PostgreSQL
   app.get('/api/auth/session', requireAuth, async (req: AuthRequest, res) => {
@@ -102,7 +175,7 @@ async function startServer() {
         req.user.assignedCommunity || LIVE_OPERATOR_PROFILE.assignedCommunity,
         req.user.workerCode || LIVE_OPERATOR_PROFILE.workerCode
       );
-      res.json({
+      return res.json({
         user: {
           uid: dbUser.uid,
           username: 'daniel_idah',
@@ -113,9 +186,8 @@ async function startServer() {
           assignedCommunity: dbUser.assignedCommunity,
         },
       });
-    } catch (error: any) {
-      console.error('Session verification error:', error);
-      res.status(500).json({ error: 'Failed to verify session' });
+    } catch {
+      return res.status(500).json({ error: 'Failed to verify session' });
     }
   });
 
@@ -123,46 +195,53 @@ async function startServer() {
   app.get('/api/bootstrap', requireAuth, async (_req: AuthRequest, res) => {
     try {
       const data = await getAllBootstrapData();
-      res.json(data);
-    } catch (error: any) {
-      console.error('Bootstrap data error:', error);
-      res.status(500).json({ error: 'Failed to load platform data' });
+      return res.json(data);
+    } catch {
+      return res.status(500).json({ error: 'Failed to load platform data' });
     }
   });
 
-  // Register a new patient
+  // Register a new patient (with strict server-side validation)
   app.post('/api/patients', requireAuth, async (req: AuthRequest, res) => {
     try {
+      const validation = validateServerPatientPayload(req.body);
+      if (!validation.valid || !validation.data) {
+        return res.status(400).json({ error: validation.error || 'Invalid patient details.' });
+      }
+
       const actor = {
         uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
         name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
         role: req.user?.role || 'supervisor',
       };
-      const result = await createPatientRecord(req.body, actor);
-      res.status(201).json(result);
-    } catch (error: any) {
-      console.error('Create patient error:', error);
-      res.status(500).json({ error: 'Failed to register patient' });
+      const result = await createPatientRecord(validation.data, actor);
+      return res.status(201).json(result);
+    } catch {
+      return res.status(500).json({ error: 'Failed to register patient' });
     }
   });
 
-  // Record a single encounter online
+  // Record a single encounter online (with strict server-side validation)
   app.post('/api/encounters', requireAuth, async (req: AuthRequest, res) => {
     try {
+      const validation = validateServerEncounterPayload(req.body);
+      if (!validation.valid || !validation.data) {
+        return res.status(400).json({ error: validation.error || 'Invalid health visit details.' });
+      }
+
       const actor = {
         uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
         name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
         role: req.user?.role || 'supervisor',
       };
-      const result = await createOrSyncEncounterRecord(req.body, actor);
-      res.status(201).json(result);
-    } catch (error: any) {
-      console.error('Create encounter error:', error);
-      res.status(500).json({ error: 'Failed to record encounter' });
+      const result = await createOrSyncEncounterRecord(validation.data, actor);
+      return res.status(201).json(result);
+    } catch {
+      return res.status(500).json({ error: 'Failed to record encounter' });
     }
   });
 
-  // Batch synchronization endpoint for offline queue items
+  // Batch synchronization endpoint for offline queue items (bounded & validated)
   app.post('/api/sync/batch', requireAuth, async (req: AuthRequest, res) => {
     try {
       const actor = {
@@ -181,218 +260,244 @@ async function startServer() {
       if (!Array.isArray(items) || items.length === 0) {
         return res.json({ syncedCount: 0, results: [] });
       }
+      if (items.length > 50) {
+        return res.status(400).json({
+          error: 'Batch synchronization exceeds maximum allowed size (50 records per batch).',
+        });
+      }
 
       const results = [];
       for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const safeQueueId = sanitizeText(item.queueId, 80);
+
         if (item.recordType === 'patient') {
-          const r = await createPatientRecord(item.payload, actor);
-          results.push({ queueId: item.queueId, type: 'patient', result: r });
-        } else {
-          const r = await createOrSyncEncounterRecord(
-            { ...item.payload, capturedOffline: true },
-            actor
-          );
-          results.push({ queueId: item.queueId, type: 'encounter', result: r });
+          const validatedPt = validateServerPatientPayload(item.payload);
+          if (!validatedPt.valid || !validatedPt.data) continue;
+          const r = await createPatientRecord(validatedPt.data, actor);
+          results.push({ queueId: safeQueueId, type: 'patient', result: r });
+        } else if (item.recordType === 'encounter') {
+          const validatedEnc = validateServerEncounterPayload({
+            ...item.payload,
+            capturedOffline: true,
+          });
+          if (!validatedEnc.valid || !validatedEnc.data) continue;
+          const r = await createOrSyncEncounterRecord(validatedEnc.data, actor);
+          results.push({ queueId: safeQueueId, type: 'encounter', result: r });
         }
       }
 
-      res.json({
+      return res.json({
         syncedCount: results.length,
         synchronizedAt: new Date().toISOString(),
         results,
       });
-    } catch (error: any) {
-      console.error('Batch sync error:', error);
-      res.status(500).json({ error: 'Batch synchronization failed' });
+    } catch {
+      return res.status(500).json({ error: 'Batch synchronization failed' });
     }
   });
 
   // Mark follow-up completed
   app.post('/api/follow-ups/:id/complete', requireAuth, async (req: AuthRequest, res) => {
     try {
-      const followUpId = parseInt(String(req.params.id), 10);
+      const followUpId = parsePositiveInt(req.params.id);
+      if (!followUpId) {
+        return res.status(400).json({ error: 'Invalid follow-up record identifier.' });
+      }
+
+      const outcomeNotes =
+        sanitizeText(req.body?.outcomeNotes, 500, true) || 'Completed and verified.';
       const actor = {
         uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
         name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
         role: req.user?.role || 'supervisor',
       };
-      const updated = await completeFollowUpRecord(
-        followUpId,
-        req.body.outcomeNotes || 'Completed and verified.',
-        actor
-      );
-      res.json({ followUp: updated });
-    } catch (error: any) {
-      console.error('Complete follow-up error:', error);
-      res.status(500).json({ error: 'Failed to complete follow-up' });
+      const updated = await completeFollowUpRecord(followUpId, outcomeNotes, actor);
+      if (!updated) {
+        return res.status(404).json({ error: 'Follow-up record not found.' });
+      }
+      return res.json({ followUp: updated });
+    } catch {
+      return res.status(500).json({ error: 'Failed to complete follow-up' });
     }
   });
 
   // Resolve data quality or conflict alert
   app.post('/api/alerts/:id/resolve', requireAuth, async (req: AuthRequest, res) => {
     try {
-      const alertId = parseInt(String(req.params.id), 10);
+      const alertId = parsePositiveInt(req.params.id);
+      if (!alertId) {
+        return res.status(400).json({ error: 'Invalid alert identifier.' });
+      }
+
+      const resolutionStatus = sanitizeResolutionStatus(req.body?.resolutionStatus);
       const actor = {
         uid: req.user?.uid || LIVE_OPERATOR_PROFILE.uid,
         name: req.user?.fullName || LIVE_OPERATOR_PROFILE.fullName,
         role: req.user?.role || 'supervisor',
       };
-      const updated = await resolveDataQualityAlertRecord(
-        alertId,
-        req.body.resolutionStatus || 'Reviewed & Merged',
-        actor
-      );
-      res.json({ alert: updated });
-    } catch (error: any) {
-      console.error('Resolve alert error:', error);
-      res.status(500).json({ error: 'Failed to resolve alert' });
+      const updated = await resolveDataQualityAlertRecord(alertId, resolutionStatus, actor);
+      if (!updated) {
+        return res.status(404).json({ error: 'Alert record not found.' });
+      }
+      return res.json({ alert: updated });
+    } catch {
+      return res.status(500).json({ error: 'Failed to resolve alert' });
     }
   });
 
   // 1. Server-side Gemini AI Operational Intelligence Brief
-  app.post('/api/intelligence/ai-brief', requireAuth, async (req: AuthRequest, res) => {
-    try {
-      const { summaryMetrics } = req.body;
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `Analyze these live operational health data metrics from NEXORA Health and generate 4 clear, user-friendly decision-support insights for a clinic supervisor. Focus on data accuracy, follow-up care, community visit trends, and workflow readiness. Use everyday language that health workers and clinic coordinators easily understand.
-Live Metrics: ${JSON.stringify(summaryMetrics)}`,
-        config: {
-          systemInstruction:
-            'You are the NEXORA Health Smart Clinic Advisor. Provide helpful, clear, non-jargon operational insights in valid JSON format.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                category: {
-                  type: Type.STRING,
-                  description:
-                    'Category of insight: Care Follow-Up, Record Quality, Community Visits, or Clinic Readiness',
+  app.post(
+    '/api/intelligence/ai-brief',
+    requireAuth,
+    aiRateLimiter,
+    async (req: AuthRequest, res) => {
+      try {
+        const rawMetrics = req.body?.summaryMetrics || {};
+        const safeMetricsJson = JSON.stringify(rawMetrics).slice(0, 4000);
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: `Analyze these live operational health data metrics from NEXORA Health and generate 4 clear, user-friendly decision-support insights for a clinic supervisor. Focus on data accuracy, follow-up care, community visit trends, and workflow readiness. Use everyday language that health workers and clinic coordinators easily understand.
+Live Metrics: ${safeMetricsJson}`,
+          config: {
+            systemInstruction:
+              'You are the NEXORA Health Smart Clinic Advisor. Provide helpful, clear, non-jargon operational insights in valid JSON format.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  category: {
+                    type: Type.STRING,
+                    description:
+                      'Category of insight: Care Follow-Up, Record Quality, Community Visits, or Clinic Readiness',
+                  },
+                  headline: {
+                    type: Type.STRING,
+                    description: 'One-sentence clear insight based on the live numbers',
+                  },
+                  recommendation: {
+                    type: Type.STRING,
+                    description: 'Practical next step for the clinic team',
+                  },
+                  priority: {
+                    type: Type.STRING,
+                    description: 'High, Medium, or Normal',
+                  },
                 },
-                headline: {
-                  type: Type.STRING,
-                  description: 'One-sentence clear insight based on the live numbers',
-                },
-                recommendation: {
-                  type: Type.STRING,
-                  description: 'Practical next step for the clinic team',
-                },
-                priority: {
-                  type: Type.STRING,
-                  description: 'High, Medium, or Normal',
-                },
+                required: ['category', 'headline', 'recommendation', 'priority'],
               },
-              required: ['category', 'headline', 'recommendation', 'priority'],
             },
           },
-        },
-      });
+        });
 
-      const text = response.text || '[]';
-      const parsed = JSON.parse(text.trim());
-      res.json({ insights: parsed, generatedBy: 'Gemini 3.8 Flash' });
-    } catch (error: any) {
-      console.error('Gemini operational intelligence error:', error);
-      res.status(500).json({
-        error: 'Smart summary is temporarily unavailable.',
-      });
+        const text = response.text || '[]';
+        const parsed = JSON.parse(text.trim());
+        return res.json({ insights: parsed, generatedBy: 'Gemini 2.5 Flash' });
+      } catch {
+        return res.status(500).json({
+          error: 'Smart summary is temporarily unavailable.',
+        });
+      }
     }
-  });
+  );
 
   // 2. Server-side Gemini AI Smart Visit & Care Note Assistant
-  app.post('/api/ai/visit-assistant', requireAuth, async (req: AuthRequest, res) => {
-    try {
-      const {
-        patientName,
-        encounterType,
-        reasonForVisit,
-        symptoms,
-        temperature,
-        bloodPressure,
-        heartRate,
-        respiratoryRate,
-      } = req.body;
+  app.post(
+    '/api/ai/visit-assistant',
+    requireAuth,
+    aiRateLimiter,
+    async (req: AuthRequest, res) => {
+      try {
+        const encounterType = sanitizeText(req.body?.encounterType, 80) || 'General Checkup';
+        const reasonForVisit = sanitizeText(req.body?.reasonForVisit, 300) || 'Routine check';
+        const symptoms = sanitizeText(req.body?.symptoms, 400) || 'None reported';
+        const temperature = sanitizeText(req.body?.temperature, 15) || 'N/A';
+        const bloodPressure = sanitizeText(req.body?.bloodPressure, 20) || 'N/A';
+        const heartRate = sanitizeText(req.body?.heartRate, 15) || 'N/A';
+        const respiratoryRate = sanitizeText(req.body?.respiratoryRate, 15) || 'N/A';
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `Assist a community health worker recording a live patient visit.
-Patient: ${patientName || 'Patient'}
-Visit Type: ${encounterType || 'General Checkup'}
-Reason for Visit: ${reasonForVisit || 'Routine check'}
-Symptoms: ${symptoms || 'None reported'}
-Vitals: Temperature ${temperature || 'N/A'}°C, Blood Pressure ${bloodPressure || 'N/A'} mmHg, Heart Rate ${heartRate || 'N/A'} bpm, Respiratory Rate ${respiratoryRate || 'N/A'} /min.
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: `Assist a community health worker recording a live patient visit.
+Visit Type: ${encounterType}
+Reason for Visit: ${reasonForVisit}
+Symptoms: ${symptoms}
+Vitals: Temperature ${temperature}°C, Blood Pressure ${bloodPressure} mmHg, Heart Rate ${heartRate} bpm, Respiratory Rate ${respiratoryRate} /min.
 
 Provide a structured, plain-language care suggestion to help complete the visit form accurately.`,
-        config: {
-          systemInstruction:
-            'You are a supportive primary healthcare assistant helping a nurse or community health worker write clear visit observations and care actions in simple, everyday language.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              suggestedObservations: {
-                type: Type.STRING,
-                description:
-                  'Clear 1-2 sentence clinical observation note summarizing the vitals and presentation',
+          config: {
+            systemInstruction:
+              'You are a supportive primary healthcare assistant helping a nurse or community health worker write clear visit observations and care actions in simple, everyday language.',
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                suggestedObservations: {
+                  type: Type.STRING,
+                  description:
+                    'Clear 1-2 sentence clinical observation note summarizing the vitals and presentation',
+                },
+                suggestedActionTaken: {
+                  type: Type.STRING,
+                  description:
+                    'Clear 1-2 sentence supportive care action and counseling step',
+                },
+                triagePriority: {
+                  type: Type.STRING,
+                  description: 'Routine Care, Watch Closely, or Urgent Hospital Referral',
+                },
+                referralRecommended: {
+                  type: Type.BOOLEAN,
+                  description: 'True if vital signs or symptoms warrant hospital referral',
+                },
+                followUpDays: {
+                  type: Type.INTEGER,
+                  description: 'Recommended number of days until next follow-up check (e.g., 2, 7, 14)',
+                },
+                familyCareTip: {
+                  type: Type.STRING,
+                  description: 'One simple health tip to share verbally with the patient or family',
+                },
               },
-              suggestedActionTaken: {
-                type: Type.STRING,
-                description:
-                  'Clear 1-2 sentence supportive care action and counseling step',
-              },
-              triagePriority: {
-                type: Type.STRING,
-                description: 'Routine Care, Watch Closely, or Urgent Hospital Referral',
-              },
-              referralRecommended: {
-                type: Type.BOOLEAN,
-                description: 'True if vital signs or symptoms warrant hospital referral',
-              },
-              followUpDays: {
-                type: Type.INTEGER,
-                description: 'Recommended number of days until next follow-up check (e.g., 2, 7, 14)',
-              },
-              familyCareTip: {
-                type: Type.STRING,
-                description: 'One simple health tip to share verbally with the patient or family',
-              },
+              required: [
+                'suggestedObservations',
+                'suggestedActionTaken',
+                'triagePriority',
+                'referralRecommended',
+                'followUpDays',
+                'familyCareTip',
+              ],
             },
-            required: [
-              'suggestedObservations',
-              'suggestedActionTaken',
-              'triagePriority',
-              'referralRecommended',
-              'followUpDays',
-              'familyCareTip',
-            ],
           },
-        },
-      });
+        });
 
-      const text = response.text || '{}';
-      const parsed = JSON.parse(text.trim());
-      res.json({ suggestion: parsed });
-    } catch (error: any) {
-      console.error('Gemini visit assistant error:', error);
-      res.status(500).json({
-        error: 'Unable to generate visit suggestions right now.',
-      });
+        const text = response.text || '{}';
+        const parsed = JSON.parse(text.trim());
+        return res.json({ suggestion: parsed });
+      } catch {
+        return res.status(500).json({
+          error: 'Unable to generate visit suggestions right now.',
+        });
+      }
     }
-  });
+  );
 
   // 3. Server-side Gemini Interactive AI Clinic & Care Assistant
-  app.post('/api/ai/ask', requireAuth, async (req: AuthRequest, res) => {
+  app.post('/api/ai/ask', requireAuth, aiRateLimiter, async (req: AuthRequest, res) => {
     try {
-      const { question, liveContext } = req.body;
-      if (!question || !String(question).trim()) {
+      const question = sanitizeText(req.body?.question, 600);
+      if (!question) {
         return res.status(400).json({ error: 'Please enter a question.' });
       }
 
+      const safeContextJson = JSON.stringify(req.body?.liveContext || {}).slice(0, 6000);
+
       const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `Live Clinic Context: ${JSON.stringify(liveContext || {})}
+        model: 'gemini-2.5-flash',
+        contents: `Live Clinic Context: ${safeContextJson}
 Operator Question: ${question}`,
         config: {
           systemInstruction:
@@ -422,10 +527,9 @@ Operator Question: ${question}`,
 
       const text = response.text || '{}';
       const parsed = JSON.parse(text.trim());
-      res.json({ reply: parsed });
-    } catch (error: any) {
-      console.error('Gemini ask assistant error:', error);
-      res.status(500).json({
+      return res.json({ reply: parsed });
+    } catch {
+      return res.status(500).json({
         error: 'AI Assistant is temporarily unavailable.',
       });
     }

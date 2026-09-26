@@ -52,7 +52,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Listen for messages from the client to pre-warm or refresh caches
+// Listen for messages from the client to pre-warm or purge sensitive caches on sign-out
 self.addEventListener('message', (event) => {
   if (!event.data) return;
 
@@ -60,9 +60,17 @@ self.addEventListener('message', (event) => {
     self.skipWaiting();
   }
 
+  if (event.data.type === 'CLEAR_SENSITIVE_CACHES') {
+    event.waitUntil(
+      Promise.all([
+        caches.delete(API_CACHE_NAME),
+        caches.delete('nexora-critical-api-v1'),
+      ])
+    );
+  }
+
   if (event.data.type === 'WARM_API_CACHE' && event.data.token) {
     const token = event.data.token;
-    const role = event.data.role || 'worker';
     event.waitUntil(
       caches.open(API_CACHE_NAME).then(async (cache) => {
         for (const apiPath of CRITICAL_GET_API_PATHS) {
@@ -71,12 +79,10 @@ self.addEventListener('message', (event) => {
               method: 'GET',
               headers: {
                 Authorization: `Bearer ${token}`,
-                'X-Nexora-Role': role,
               },
             });
             const res = await fetch(req);
             if (res && res.ok) {
-              // Key by pathname so offline GET requests match regardless of headers
               await cache.put(apiPath, res.clone());
             }
           } catch (_err) {
@@ -102,73 +108,29 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 1. Offline fallback for POST /api/auth/demo-login so installed PWA can sign in while offline
-  if (request.method === 'POST' && url.pathname === '/api/auth/demo-login') {
-    event.respondWith(
-      (async () => {
-        try {
-          const clonedReq = request.clone();
-          const networkResponse = await fetch(request);
-          return networkResponse;
-        } catch (_networkError) {
-          try {
-            const body = await request.json();
-            const isSupervisor =
-              body.role === 'supervisor' ||
-              String(body.email || '').toLowerCase() === 'supervisor@nexora.health';
-            const profile = isSupervisor
-              ? {
-                  token: 'nexora-demo-supervisor',
-                  uid: 'demo-supervisor-uid-001',
-                  email: 'supervisor@nexora.health',
-                  fullName: 'Dr. Tunde Okonkwo',
-                  role: 'supervisor',
-                  workerCode: 'SUP-002',
-                  assignedCommunity: 'Kano & Kaduna Catchment Zone',
-                }
-              : {
-                  token: 'nexora-demo-worker',
-                  uid: 'demo-worker-uid-001',
-                  email: 'worker@nexora.health',
-                  fullName: 'Amina Bello (CHW)',
-                  role: 'worker',
-                  workerCode: 'CHW-014',
-                  assignedCommunity: 'Ungogo Ward A',
-                };
-            return new Response(
-              JSON.stringify({ user: profile, token: profile.token, offlineCachedAuth: true }),
-              {
-                status: 200,
-                headers: { 'Content-Type': 'application/json', 'X-Nexora-Offline-Cache': 'HIT' },
-              }
-            );
-          } catch {
-            return new Response(
-              JSON.stringify({ error: 'Offline login fallback failed' }),
-              { status: 503, headers: { 'Content-Type': 'application/json' } }
-            );
-          }
-        }
-      })()
-    );
-    return;
-  }
-
-  // Only cache GET requests for the remaining rules
+  // Only cache GET requests
   if (request.method !== 'GET') return;
 
-  // 2. Critical GET API Routes (/api/bootstrap, /api/auth/session) -> NetworkFirst with Cache Fallback
+  // 1. Critical GET API Routes (/api/bootstrap, /api/auth/session) -> NetworkFirst with Cache Fallback
+  // Require Authorization header on request so unauthenticated callers cannot read cached PHI
   if (CRITICAL_GET_API_PATHS.some((path) => url.pathname.startsWith(path))) {
     event.respondWith(
       (async () => {
+        const hasAuthHeader = request.headers.has('Authorization');
         const cache = await caches.open(API_CACHE_NAME);
         try {
           const networkResponse = await fetch(request);
-          if (networkResponse && networkResponse.ok) {
+          if (networkResponse && networkResponse.ok && hasAuthHeader) {
             await cache.put(url.pathname, networkResponse.clone());
           }
           return networkResponse;
         } catch (_err) {
+          if (!hasAuthHeader) {
+            return new Response(
+              JSON.stringify({ error: 'Authentication required for offline cache access.' }),
+              { status: 401, headers: { 'Content-Type': 'application/json' } }
+            );
+          }
           const cachedResponse =
             (await cache.match(url.pathname)) || (await cache.match(request));
           if (cachedResponse) {
@@ -193,7 +155,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 3. HTML Navigation Requests -> NetworkFirst with /index.html Offline Shell Fallback
+  // 2. HTML Navigation Requests -> NetworkFirst with /index.html Offline Shell Fallback
   if (request.mode === 'navigate') {
     event.respondWith(
       (async () => {
@@ -216,7 +178,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 4. Core Application Assets (JS, TS/TSX modules, CSS, Fonts, Icons, Manifest) -> NetworkFirst with Cache Fallback
+  // 3. Core Application Assets (JS, TS/TSX modules, CSS, Fonts, Icons, Manifest) -> NetworkFirst with Cache Fallback
   const isStaticOrModuleAsset =
     url.origin === self.location.origin ||
     url.hostname.includes('fonts.googleapis.com') ||

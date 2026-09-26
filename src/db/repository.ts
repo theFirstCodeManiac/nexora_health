@@ -56,14 +56,14 @@ export async function getAllBootstrapData() {
       alertRows,
       auditRows,
     ] = await Promise.all([
-      db.select().from(organizations),
-      db.select().from(communities),
-      db.select().from(users),
-      db.select().from(patients).orderBy(desc(patients.id)),
-      db.select().from(encounters).orderBy(desc(encounters.id)),
-      db.select().from(followUps).orderBy(desc(followUps.id)),
-      db.select().from(syncQueue).orderBy(desc(syncQueue.id)),
-      db.select().from(dataQualityAlerts).orderBy(desc(dataQualityAlerts.id)),
+      db.select().from(organizations).limit(20),
+      db.select().from(communities).limit(100),
+      db.select().from(users).limit(100),
+      db.select().from(patients).orderBy(desc(patients.id)).limit(250),
+      db.select().from(encounters).orderBy(desc(encounters.id)).limit(250),
+      db.select().from(followUps).orderBy(desc(followUps.id)).limit(250),
+      db.select().from(syncQueue).orderBy(desc(syncQueue.id)).limit(200),
+      db.select().from(dataQualityAlerts).orderBy(desc(dataQualityAlerts.id)).limit(200),
       db.select().from(auditLogs).orderBy(desc(auditLogs.id)).limit(100),
     ]);
 
@@ -100,9 +100,22 @@ export async function createPatientRecord(
 ) {
   try {
     await ensureSeeded();
-    const existingPatients = await db.select().from(patients);
-    const nextNum = 1001 + existingPatients.length;
-    const generatedId = payload.patientId?.trim() || `NXR-PT-${nextNum}`;
+    const existingPatients = await db
+      .select()
+      .from(patients)
+      .orderBy(desc(patients.id))
+      .limit(250);
+
+    const maxExistingId = existingPatients.length > 0 ? existingPatients[0].id : 0;
+    let generatedId = payload.patientId?.trim() || `NXR-PT-${1001 + maxExistingId}`;
+
+    // Prevent silent IDOR overwrite if the requested patientId already exists
+    const idCollision = existingPatients.find(
+      (p) => p.patientId.toLowerCase() === generatedId.toLowerCase()
+    );
+    if (idCollision) {
+      generatedId = `NXR-PT-${1001 + maxExistingId}-${Math.floor(100 + Math.random() * 899)}`;
+    }
 
     // If community is new, add it to communities table automatically so community lists reflect live data
     const cleanCommunity = payload.community?.trim() || 'General Clinic Ward';
@@ -116,7 +129,7 @@ export async function createPatientRecord(
       await db
         .insert(communities)
         .values({
-          code: `COM-${Date.now().toString().slice(-4)}`,
+          code: `COM-${Date.now().toString().slice(-4)}-${Math.floor(10 + Math.random() * 89)}`,
           name: cleanCommunity,
           state: 'Active Catchment',
           organizationId: 1,
@@ -126,13 +139,14 @@ export async function createPatientRecord(
         .onConflictDoNothing();
     }
 
-    // Duplicate check by name + DOB or same patientId
-    const duplicateCandidate = existingPatients.find(
-      (p) =>
-        p.patientId.toLowerCase() === generatedId.toLowerCase() ||
-        (p.fullName.trim().toLowerCase() === payload.fullName.trim().toLowerCase() &&
-          p.dateOfBirth === payload.dateOfBirth)
-    );
+    // Duplicate check by name + DOB or colliding requested patientId
+    const duplicateCandidate =
+      idCollision ||
+      existingPatients.find(
+        (p) =>
+          p.fullName.trim().toLowerCase() === payload.fullName.trim().toLowerCase() &&
+          p.dateOfBirth === payload.dateOfBirth
+      );
 
     const [created] = await db
       .insert(patients)
@@ -150,19 +164,11 @@ export async function createPatientRecord(
         syncStatus: 'synchronized',
         version: 1,
       })
-      .onConflictDoUpdate({
-        target: patients.patientId,
-        set: {
-          phoneNumber: payload.phoneNumber.trim(),
-          emergencyContact: payload.emergencyContact.trim(),
-          notes: payload.notes || '',
-        },
-      })
       .returning();
 
     let createdAlert = null;
     if (duplicateCandidate) {
-      const alertCode = `DQA-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 899)}`;
+      const alertCode = `DQA-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 8999)}`;
       const [alert] = await db
         .insert(dataQualityAlerts)
         .values({
@@ -226,11 +232,17 @@ export async function createOrSyncEncounterRecord(
 ) {
   try {
     await ensureSeeded();
-    const allEncounters = await db.select().from(encounters);
+    const allEncounters = await db
+      .select()
+      .from(encounters)
+      .orderBy(desc(encounters.id))
+      .limit(250);
+
+    const maxExistingId = allEncounters.length > 0 ? allEncounters[0].id : 0;
     const clientRecId =
-      payload.clientRecordId || `client-rec-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      payload.clientRecordId || `client-rec-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     const year = new Date().getFullYear();
-    const encounterCode = `ENC-${year}-${1001 + allEncounters.length}`;
+    const encounterCode = `ENC-${year}-${1001 + maxExistingId}`;
 
     // Server-side validation & duplicate detection
     const issues: string[] = [];
@@ -323,7 +335,7 @@ export async function createOrSyncEncounterRecord(
     // If followUpRequired, automatically create a follow_up entry
     let createdFollowUp = null;
     if (payload.followUpRequired) {
-      const fupCode = `FUP-${year}-${Math.floor(100 + Math.random() * 899)}`;
+      const fupCode = `FUP-${year}-${Math.floor(1000 + Math.random() * 8999)}`;
       const todayIso = new Date().toISOString().slice(0, 10);
       const due = payload.followUpDate?.trim() || todayIso;
       const [fup] = await db
@@ -348,7 +360,7 @@ export async function createOrSyncEncounterRecord(
     // If duplicate or needs_review, create a Data Quality Alert
     let createdAlert = null;
     if (dataQualityStatus !== 'complete') {
-      const alertCode = `DQA-${year}-${Math.floor(100 + Math.random() * 899)}`;
+      const alertCode = `DQA-${year}-${Math.floor(1000 + Math.random() * 8999)}`;
       const [alert] = await db
         .insert(dataQualityAlerts)
         .values({

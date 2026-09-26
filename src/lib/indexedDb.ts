@@ -129,3 +129,23 @@ export async function setMetaValue<T>(key: string, value: T): Promise<void> {
     console.error('IndexedDB meta write error:', err);
   }
 }
+
+/**
+ * Removes cached server bootstrap PHI snapshots upon sign-out while preserving
+ * any unsynced Pending items in the offline synchronization queue.
+ */
+export async function clearSensitiveOfflineState(): Promise<void> {
+  try {
+    const db = await openDatabase();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE_META, 'readwrite');
+      const store = tx.objectStore(STORE_META);
+      store.delete('cachedBootstrapLive');
+      store.delete('cachedBootstrap');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch {
+    // Ignore IndexedDB cleanup error
+  }
+}
